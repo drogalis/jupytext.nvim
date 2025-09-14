@@ -11,7 +11,7 @@ features and a simpler configuration.
 `lazy.nvim` example:
 ```lua
 return {
-  "GCBallesteros/jupytext.nvim",
+  "drogalis/jupytext.nvim",
   config = true,
   -- Depending on your nvim distro or config you may need to make the loading not lazy
   -- lazy=false,

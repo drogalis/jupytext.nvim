@@ -16,11 +16,18 @@ local write_to_ipynb = function(event, output_extension)
   jupytext_filename = vim.fn.resolve(vim.fn.expand(jupytext_filename))
 
   vim.cmd.write({ jupytext_filename, bang = true })
-  commands.run_jupytext_command(vim.fn.shellescape(jupytext_filename), {
+  
+  local success = commands.run_jupytext_command(vim.fn.shellescape(jupytext_filename), {
     ["--update"] = "",
     ["--to"] = "ipynb",
     ["--output"] = vim.fn.shellescape(ipynb_filename),
   })
+  
+  if not success then
+    vim.api.nvim_err_writeln("Failed to convert to ipynb")
+    return
+  end
+  
   local buf = vim.api.nvim_get_current_buf()
   vim.api.nvim_set_option_value("modified", false, { buf = buf })
 
@@ -49,44 +56,60 @@ local style_and_extension = function(metadata)
     else
       output_extension = M.config.output_extension
     end
-    to_extension_and_style = M.config.output_extension .. ":" .. M.config.style
+    to_extension_and_style = output_extension .. ":" .. M.config.style
   end
 
   return custom_formatting, output_extension, to_extension_and_style
 end
 
 local cleanup = function(ipynb_filename, delete)
-  local metadata = utils.get_ipynb_metadata(ipynb_filename)
+  local ok, metadata = pcall(utils.get_ipynb_metadata, ipynb_filename)
+  if not ok then
+    vim.api.nvim_err_writeln("Failed to get metadata for cleanup: " .. metadata)
+    return
+  end
 
   local _, output_extension, _ = style_and_extension(metadata)
 
   local jupytext_filename = utils.get_jupytext_file(ipynb_filename, output_extension)
   if delete then
-    vim.fn.delete(vim.fn.resolve(vim.fn.expand(jupytext_filename)))
+    local resolved_path = vim.fn.resolve(vim.fn.expand(jupytext_filename))
+    if vim.fn.filereadable(resolved_path) == 1 then
+      vim.fn.delete(resolved_path)
+    end
   end
 end
 
 local read_from_ipynb = function(ipynb_filename)
-  local metadata = utils.get_ipynb_metadata(ipynb_filename)
-  local ipynb_filename = vim.fn.resolve(vim.fn.expand(ipynb_filename))
+  local ok, metadata = pcall(utils.get_ipynb_metadata, ipynb_filename)
+  if not ok then
+    vim.api.nvim_err_writeln("Failed to read notebook metadata: " .. metadata)
+    return
+  end
+  
+  local ipynb_filename_resolved = vim.fn.resolve(vim.fn.expand(ipynb_filename))
 
   -- Decide output extension and style
   local custom_formatting, output_extension, to_extension_and_style = style_and_extension(metadata)
 
   local jupytext_filename = utils.get_jupytext_file(ipynb_filename, output_extension)
   local jupytext_file_exists = vim.fn.filereadable(jupytext_filename) == 1
-  -- filename is the notebook
-  local filename_exists = vim.fn.filereadable(ipynb_filename)
+  local filename_exists = vim.fn.filereadable(ipynb_filename_resolved) == 1
 
   if filename_exists and not jupytext_file_exists then
-    commands.run_jupytext_command(vim.fn.shellescape(ipynb_filename), {
+    local success = commands.run_jupytext_command(vim.fn.shellescape(ipynb_filename_resolved), {
       ["--to"] = to_extension_and_style,
       ["--output"] = vim.fn.shellescape(jupytext_filename),
     })
+    
+    if not success then
+      vim.api.nvim_err_writeln("Failed to convert notebook to jupytext format")
+      return
+    end
   end
 
   -- This is when the magic happens and we read the new file into the buffer
-  if vim.fn.filereadable(jupytext_filename) then
+  if vim.fn.filereadable(jupytext_filename) == 1 then
     local jupytext_content = vim.fn.readfile(jupytext_filename)
 
     -- Need to add an extra line so that the undo dance that comes later on
@@ -96,7 +119,7 @@ local read_from_ipynb = function(ipynb_filename)
     -- Replace the buffer content with the jupytext content
     vim.api.nvim_buf_set_lines(0, 0, -1, false, jupytext_content)
   else
-    error "Couldn't find jupytext file."
+    vim.api.nvim_err_writeln("Couldn't find or create jupytext file: " .. jupytext_filename)
     return
   end
 
@@ -140,12 +163,6 @@ local read_from_ipynb = function(ipynb_filename)
     ft = "cpp"
   end
 
-  -- In order to make :undo a no-op immediately after the buffer is read, we
-  -- need to do this dance with 'undolevels'.  Actually discarding the undo
-  -- history requires performing a change after setting 'undolevels' to -1 and,
-  -- luckily, we have one we need to do (delete the extra line from the :r
-  -- command)
-  -- (Comment straight from goerz/jupytext.vim)
   local levels = vim.o.undolevels
   vim.o.undolevels = -1
   vim.api.nvim_command "silent 1delete"
@@ -153,8 +170,6 @@ local read_from_ipynb = function(ipynb_filename)
 
   vim.api.nvim_command("setlocal fenc=utf-8 ft=" .. ft)
 
-  -- First time we enter the buffer redraw. Don't know why but jupytext.vim was
-  -- doing it. Apply Chesterton's fence principle.
   vim.api.nvim_create_autocmd("BufEnter", {
     pattern = "<buffer>",
     group = "jupytext-nvim",
